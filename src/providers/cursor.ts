@@ -1,3 +1,5 @@
+// Modified from OpenUsage 1.0.1 (https://github.com/paulocarinhena/OpenUsage), Apache-2.0.
+// Cursor meters are the two plan pools, not the blended cycle or the bonus ledger. See FORK.md.
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -65,19 +67,19 @@ export const cursor: Provider = {
     const resetsAt = toMillis(body?.billingCycleEnd)
     const plan = body?.individualUsage?.plan
     if (plan?.enabled !== false && plan) {
-      const pct =
-        typeof plan.totalPercentUsed === "number"
-          ? plan.totalPercentUsed
-          : plan.limit
-            ? (plan.used / plan.limit) * 100
-            : 0
-      windows.push({ label: "Billing Cycle", usedPct: clampPct(pct), resetsAt })
-      // totalPercentUsed is measured against plan + bonus, so show the combined spend.
-      const b = plan.breakdown
-      if (typeof b?.total === "number" && b.bonus > 0)
-        extras.push({ label: "Used", value: `${dollars(b.total)} (${dollars(b.bonus)} bonus)` })
-      else if (typeof plan.used === "number" && typeof plan.limit === "number" && plan.limit > 0)
-        extras.push({ label: "Included", value: `${dollars(plan.used)} / ${dollars(plan.limit)}` })
+      // autoPercentUsed is how much of the Cursor-model limit is already spent
+      // (Grok, Composer). apiPercentUsed is the other-model pool. The plan's
+      // cent totals and breakdown.bonus are a different ledger and must not
+      // be drawn as those two bars.
+      const hasModelPools = typeof plan.autoPercentUsed === "number" || typeof plan.apiPercentUsed === "number"
+      if (hasModelPools) {
+        if (typeof plan.autoPercentUsed === "number")
+          windows.push({ label: "Limits", usedPct: clampPct(plan.autoPercentUsed), resetsAt })
+        if (typeof plan.apiPercentUsed === "number")
+          windows.push({ label: "Other models", usedPct: clampPct(plan.apiPercentUsed), resetsAt })
+      } else if (typeof plan.totalPercentUsed === "number") {
+        windows.push({ label: "Billing Cycle", usedPct: clampPct(plan.totalPercentUsed), resetsAt })
+      }
     }
     const onDemand = body?.individualUsage?.onDemand
     if (onDemand?.enabled && typeof onDemand.used === "number") {

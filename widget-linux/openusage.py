@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Modified from OpenUsage 1.0.1 (https://github.com/paulocarinhena/OpenUsage), Apache-2.0.
+# This fork changes the Linux window, pointer input and drag. See FORK.md.
 # Floating Claude / Codex / Cursor / OpenCode Go usage widget for Linux.
 # GTK 3 through PyGObject, which most desktops (GNOME, Cinnamon, MATE, Xfce...) already ship: nothing to build.
 # Data comes from ../scripts/usage-json.ts, run with Node (>= 22.6).
@@ -18,10 +20,26 @@ import uuid
 import warnings
 
 # Placing and pinning a window on top is up to the compositor on Wayland, so run through XWayland there.
+# setdefault is not enough: a parent process (Cursor, for example) may already export GDK_BACKEND=wayland.
 if os.environ.get("WAYLAND_DISPLAY") and os.environ.get("DISPLAY"):
-    os.environ.setdefault("GDK_BACKEND", "x11")
+    os.environ["GDK_BACKEND"] = "x11"
 
 import gi
+
+# python3-gi-cairo is not installed. Without the cairo bridge, drawing a
+# provider logo raises TypeError and aborts the whole window before the
+# drag header exists. launch.py loads the vendored bridge; a direct start
+# of this file must do the same.
+_runtime_gi = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    ".runtime", "usr", "lib", "python3", "dist-packages", "gi",
+)
+try:
+    gi.require_foreign("cairo")
+except ImportError:
+    if os.path.isdir(_runtime_gi) and _runtime_gi not in gi.__path__:
+        gi.__path__.append(_runtime_gi)
+    gi.require_foreign("cairo")
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
@@ -391,6 +409,15 @@ def slots(u):
     return short, long
 
 
+def meter_windows(u):
+    """Hour and week stay the pair. Any other pool, such as Cursor's second limit, stays on the row."""
+    ws = u.get("windows") or []
+    short, long = slots(u)
+    chosen = [w for w in (short, long) if w is not None]
+    rest = [w for w in ws if w not in chosen and "Opus" not in w["label"] and "Sonnet" not in w["label"]]
+    return chosen + rest
+
+
 def slot_name(w):
     lb = w["label"]
     if "Hour" in lb:
@@ -479,7 +506,7 @@ def logo_surface(pid, color, size):
                 loader.write(svg.encode())
                 loader.close()
                 surf = Gdk.cairo_surface_create_from_pixbuf(loader.get_pixbuf(), scale, None)
-            except GLib.Error:
+            except (GLib.Error, TypeError):
                 surf = None
         _logo_cache[key] = surf
     return _logo_cache[key]
@@ -547,6 +574,7 @@ class Model:
         self.updated_at = None
         self.refreshing = False
         self.last_error = ""
+        # Fresh installs show how much is already spent. "remaining" is only an explicit setting.
         self.display = "remaining" if settings.get("display") == "remaining" else "used"
         self.layout = settings.get("layout") if settings.get("layout") in ("compact", "bar") else "normal"
         # How compact and strip draw a limit: "ring" or "bar" (a slim meter).
@@ -1186,8 +1214,7 @@ def meter_line(u, w, display, accent, length, index, intro):
 
 def account_meter_row(u, display, accent, index, intro):
     """Compact with bars: one short line per account, its name and a meter per limit."""
-    short, long = slots(u)
-    ws = [w for w in (short, long) if w is not None]
+    ws = meter_windows(u)
     extras = u.get("extras") or []
     title = short_account(u)
     if not title:
@@ -1237,7 +1264,7 @@ def compact_card(pid, accounts, display, gauge="ring", index=0, intro=False):
 def strip_chip(u, display, gauge, index, intro):
     """One account in the strip: a ring pair around the mark (or the mark and a meter per limit) and its numbers."""
     short, long = slots(u)
-    ws = [w for w in (short, long) if w is not None]
+    ws = meter_windows(u) if gauge == "bar" else [w for w in (short, long) if w is not None]
     extras = u.get("extras") or []
     accent = C.get(u["id"], C["text"])
     content = hbox(7)
@@ -1392,6 +1419,11 @@ class Floating(Gtk.Window):
         # While a refresh runs, a soft light sweeps across the frame.
         self.shine = Gtk.DrawingArea()
         self.shine.connect("draw", self.draw_shine)
+        # The sweep is painted over the whole panel. It must not take clicks:
+        # otherwise the header, settings and close never see the pointer.
+        self.shine.set_sensitive(False)
+        self.shine.connect("realize", lambda w: self._shine_ignore_input(w))
+        self.shine.connect("size-allocate", lambda w, _a: self._shine_ignore_input(w))
         self.shining, self.shine_alpha, self.shine_t0, self.shine_tick = False, 0.0, time.monotonic(), None
         overlay = Gtk.Overlay()
         overlay.add(self.frame)
@@ -1447,18 +1479,61 @@ class Floating(Gtk.Window):
         cr.set_source(grad)
         cr.paint()
 
+    def _shine_ignore_input(self, widget):
+        # An empty input shape lets the pointer fall through to the controls.
+        if widget.get_window() is not None and cairo is not None:
+            widget.input_shape_combine_region(cairo.Region())
+
     def drag_area(self, child, menu=None):
         eb = Gtk.EventBox()
         eb.add(child)
+        eb.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.BUTTON1_MOTION_MASK
+        )
+        drag = {"on": False}
 
-        def press(_w, ev):
+        def on_control(ev):
+            widget = Gtk.get_event_widget(ev)
+            while widget is not None and widget is not eb:
+                if isinstance(widget, (Gtk.Button, Gtk.Switch, Gtk.Entry)):
+                    return True
+                widget = widget.get_parent()
+            return False
+
+        def press(w, ev):
+            # Buttons inside the header must click. A compositor move-grab on
+            # this undecorated XWayland window does not move it and swallows the click.
+            if on_control(ev):
+                return False
             if ev.button == 1 and ev.type == Gdk.EventType.BUTTON_PRESS:
-                self.begin_move_drag(ev.button, int(ev.x_root), int(ev.y_root), ev.time)
-            elif ev.button == 3 and menu:
+                x, y = self.get_position()
+                drag.update(on=True, x=ev.x_root, y=ev.y_root, wx=x, wy=y)
+                w.grab_add()
+                return True
+            if ev.button == 3 and menu:
                 menu().popup_at_pointer(ev)
+                return True
+            return False
+
+        def motion(_w, ev):
+            if not drag["on"] or not (ev.state & Gdk.ModifierType.BUTTON1_MASK):
+                return False
+            self.move(int(drag["wx"] + ev.x_root - drag["x"]), int(drag["wy"] + ev.y_root - drag["y"]))
             return True
 
+        def release(w, ev):
+            if drag["on"] and ev.button == 1:
+                drag["on"] = False
+                if w.has_grab():
+                    w.grab_remove()
+                return True
+            return False
+
         eb.connect("button-press-event", press)
+        eb.connect("motion-notify-event", motion)
+        eb.connect("button-release-event", release)
         return eb
 
     def set_content(self, widget):
@@ -1704,7 +1779,13 @@ class App(Gtk.Application):
         tools.set_opacity(0.35)
         self.strip_tools = tools
         row.pack_start(margins(tools, left=2), False, False, 0)
-        self.win.set_content(self.win.drag_area(row, self.make_menu))
+        # Buttons stay outside the drag surface, or a press starts a move instead of a click.
+        self.win.set_content(row)
+        grip_parent = grip.get_parent()
+        if grip_parent is not None:
+            grip_parent.remove(grip)
+        row.pack_start(self.win.drag_area(grip, self.make_menu), False, False, 0)
+        row.reorder_child(grip.get_parent(), 0)
 
     def build(self):
         m = self.model
@@ -1721,16 +1802,16 @@ class App(Gtk.Application):
         root = margins(vbox(), 10, 14, 10, 14)
 
         head = hbox(2)
-        head.pack_start(
-            label(span("◷", 13, C["muted"], "bold") + span(" OpenUsage", 13, weight="bold")), True, True, 0
-        )
+        title = label(span("◷", 13, C["muted"], "bold") + span(" OpenUsage", 13, weight="bold"))
+        title.set_hexpand(True)
+        head.pack_start(self.win.drag_area(title, self.make_menu), True, True, 0)
         head.pack_start(with_dot(header_button("⚙", "Settings", self.show_settings), m.update["behind"] > 0), False, False, 0)
         head.pack_start(header_button("+", "Add account", self.show_add_menu), False, False, 0)
         head.pack_start(header_button("Used" if m.display == "used" else "Left", "Used / left", m.toggle_display), False, False, 0)
         head.pack_start(spin_button("⟳", "Refresh", m.refresh, m.refreshing), False, False, 0)
         hide_tip = "Hide (tray icon brings it back)" if self.has_tray else "Minimize"
         head.pack_start(header_button("✕", hide_tip, self.hide_window), False, False, 0)
-        root.pack_start(margins(self.win.drag_area(head, self.make_menu), bottom=8), False, False, 0)
+        root.pack_start(margins(head, bottom=8), False, False, 0)
         root.pack_start(margins(divider(), bottom=8), False, False, 0)
 
         shown = m.shown()

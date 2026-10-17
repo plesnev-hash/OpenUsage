@@ -12,6 +12,10 @@
 [![Version](https://img.shields.io/github/v/tag/paulocarinhena/OpenUsage?style=flat-square&label=version&color=D97757)](https://github.com/paulocarinhena/OpenUsage/tags)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-818CF8?style=flat-square)](LICENSE)
 
+<br>
+
+**Fork of [paulocarinhena/OpenUsage](https://github.com/paulocarinhena/OpenUsage) 1.0.1 (`1aac35a`), Apache-2.0.** Changes and the checks that were actually run are in [FORK.md](FORK.md).
+
 </div>
 
 <br>
@@ -25,7 +29,7 @@
 **Ask your agent:**
 
 ```text
-Install this plugin: https://github.com/paulocarinhena/OpenUsage
+Install this plugin: https://github.com/plesnev-hash/OpenUsage
 ```
 
 <p align="center"><sub>Rather do it by hand? <a href="Installation.md"><b>Installation.md</b></a> has every step for Windows, macOS and Linux.</sub></p>

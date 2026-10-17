@@ -1,3 +1,5 @@
+// Modified from OpenUsage 1.0.1 (https://github.com/paulocarinhena/OpenUsage), Apache-2.0.
+// On Linux, Claude Desktop usage is read when the CLI credentials file is absent. See FORK.md.
 import { existsSync } from "node:fs"
 import { execFile } from "node:child_process"
 import { createHash } from "node:crypto"
@@ -41,6 +43,32 @@ async function readCredentials(profile?: string): Promise<string> {
   }
 }
 
+/**
+ * Claude Desktop on Linux does not write ~/.claude/.credentials.json. It keeps
+ * the session itself and records the latest plan meters in this history file.
+ */
+function desktopUsageFile() {
+  const base = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config")
+  return join(base, "Claude", "plan-usage-history.json")
+}
+
+async function readDesktopWindows(): Promise<UsageWindow[] | undefined> {
+  let raw: string
+  try {
+    raw = await readFile(desktopUsageFile(), "utf8")
+  } catch {
+    return undefined
+  }
+  const samples = JSON.parse(raw)?.samples
+  const last = Array.isArray(samples) ? samples[samples.length - 1] : undefined
+  const usage = last?.u
+  if (!usage || typeof usage !== "object") return undefined
+  const windows: UsageWindow[] = []
+  if (typeof usage.fh === "number") windows.push({ label: "5-Hour", usedPct: clampPct(usage.fh) })
+  if (typeof usage.sd === "number") windows.push({ label: "7-Day Limit", usedPct: clampPct(usage.sd) })
+  return windows.length ? windows : undefined
+}
+
 async function readToken(profile?: string) {
   let raw: string
   try {
@@ -60,7 +88,18 @@ export const claude: Provider = {
   id: "claude",
   name: "Claude",
   async fetch(signal, profile) {
-    const { token, plan } = await readToken(profile)
+    let token: string
+    let plan: string | undefined
+    try {
+      ;({ token, plan } = await readToken(profile))
+    } catch (err) {
+      // A Desktop session has no CLI credentials file. Use the meters Desktop already saved.
+      if (!profile) {
+        const windows = await readDesktopWindows()
+        if (windows) return { id: "claude", name: "Claude", windows, extras: [], fetchedAt: Date.now() } satisfies ProviderUsage
+      }
+      throw err
+    }
     const body = await getJson(
       "https://api.anthropic.com/api/oauth/usage",
       {
