@@ -1197,17 +1197,18 @@ def short_slot(w):
     return "cr" if n.startswith("Credit") else "day" if n.startswith("Daily") else n[:3].lower() if len(n) > 3 else n
 
 
-def meter_line(u, w, display, accent, length, index, intro):
+def meter_line(u, w, display, accent, length, index, intro, scale=1):
     """5h ▬▬▬▬▭▭ 72%"""
+    px = lambda n: max(1, int(round(n * scale)))
     lv = level(w["usedPct"])
     line = hbox(0)
-    name = label(span(short_slot(w), 10, C["muted"]))
-    name.set_size_request(16, -1)
+    name = label(span(short_slot(w), px(10), C["muted"]))
+    name.set_size_request(px(16), -1)
     line.pack_start(name, False, False, 0)
-    meter = Meter(w["usedPct"], lv or accent, f"{uid(u)}|{w['label']}|m", length, 5, 120 + 70 * index, intro, display)
-    line.pack_start(margins(meter, left=3, right=5), False, False, 0)
-    pct = label(span(f"{round(shown_pct(w, display))}%", 11, lv or C["text"], "bold"))
-    pct.set_size_request(27, -1)
+    meter = Meter(w["usedPct"], lv or accent, f"{uid(u)}|{w['label']}|m", px(length), max(2, px(4)), 120 + 70 * index, intro, display)
+    line.pack_start(margins(meter, left=px(2), right=px(3)), False, False, 0)
+    pct = label(span(f"{round(shown_pct(w, display))}%", px(11), lv or C["text"], "bold"))
+    pct.set_size_request(px(27), -1)
     line.pack_start(pct, False, False, 0)
     return line
 
@@ -1261,18 +1262,24 @@ def compact_card(pid, accounts, display, gauge="ring", index=0, intro=False):
     return hover_card(outer)
 
 
+# Slim strip, sized to sit on the GNOME top bar (about 32px) and a little narrower than the full row.
+STRIP_SCALE = 0.7
+
+
 def strip_chip(u, display, gauge, index, intro):
     """One account in the strip: a ring pair around the mark (or the mark and a meter per limit) and its numbers."""
     short, long = slots(u)
     ws = meter_windows(u) if gauge == "bar" else [w for w in (short, long) if w is not None]
     extras = u.get("extras") or []
     accent = C.get(u["id"], C["text"])
-    content = hbox(7)
+    sc = STRIP_SCALE
+    px = lambda n: max(1, int(round(n * sc)))
+    content = hbox(px(5))
     if gauge == "bar":
         mark = styled(Gtk.Box(), "mark")
-        mark.set_size_request(26, 26)
+        mark.set_size_request(px(22), px(22))
         mark.set_valign(Gtk.Align.CENTER)
-        lg = logo(u["id"], accent, 14)
+        lg = logo(u["id"], accent, px(12))
         lg.set_halign(Gtk.Align.CENTER)
         mark.pack_start(lg, True, True, 0)
         content.pack_start(mark, False, False, 0)
@@ -1280,7 +1287,7 @@ def strip_chip(u, display, gauge, index, intro):
         col.set_valign(Gtk.Align.CENTER)
         if ws:
             for w in ws:
-                col.pack_start(meter_line(u, w, display, accent, 46, index, intro), False, False, 0)
+                col.pack_start(meter_line(u, w, display, accent, 40, index, intro, sc), False, False, 0)
             if len(ws) == 1:
                 who = short_account(u) or (f"{extras[0]['value']} {extras[0]['label'].lower()}" if extras else "")
                 if who:
@@ -1293,7 +1300,7 @@ def strip_chip(u, display, gauge, index, intro):
             col.pack_start(label(span("error" if u.get("error") else "no data", 10, C["warn"] if u.get("error") else C["muted"])), False, False, 0)
         content.pack_start(col, False, False, 0)
     else:
-        content.pack_start(Ring(u, display, 32, 3, accent), False, False, 0)
+        content.pack_start(Ring(u, display, px(28), max(2, px(3)), accent), False, False, 0)
         col = vbox(0)
         col.set_valign(Gtk.Align.CENTER)
         main = short or long
@@ -1317,7 +1324,7 @@ def strip_chip(u, display, gauge, index, intro):
         if sub:
             col.pack_start(label(span(sub, 10, color)), False, False, 0)
         content.pack_start(col, False, False, 0)
-    chip = styled(hover_box(margins(content, 1, 10 if gauge == "ring" else 6, 1, 1), tip_text(u, display)), "chip")
+    chip = styled(hover_box(margins(content, px(1), px(8) if gauge == "ring" else px(4), px(1), px(1)), tip_text(u, display)), "chip")
     # Numbers kept from a failed refresh fade back a little.
     target = 0.55 if u.get("error") and ws else 1.0
     if intro:
@@ -1422,6 +1429,9 @@ class Floating(Gtk.Window):
         # The sweep is painted over the whole panel. It must not take clicks:
         # otherwise the header, settings and close never see the pointer.
         self.shine.set_sensitive(False)
+        # The top bar reserves its height and pushes a normal window down. An
+        # override-redirect window can sit on that bar; drag still uses our own move().
+        self.connect("realize", self._allow_panel_overlap)
         self.shine.connect("realize", lambda w: self._shine_ignore_input(w))
         self.shine.connect("size-allocate", lambda w, _a: self._shine_ignore_input(w))
         self.shining, self.shine_alpha, self.shine_t0, self.shine_tick = False, 0.0, time.monotonic(), None
@@ -1430,6 +1440,11 @@ class Floating(Gtk.Window):
         overlay.add_overlay(self.shine)
         overlay.set_overlay_pass_through(self.shine, True)
         self.add(overlay)
+
+    def _allow_panel_overlap(self, _widget):
+        window = self.get_window()
+        if window is not None:
+            window.set_override_redirect(True)
 
     def set_strip(self, on):
         self.strip = on
@@ -1755,8 +1770,9 @@ class App(Gtk.Application):
 
     def build_strip(self):
         m = self.model
-        row = margins(hbox(2), 4, 5, 4, 5)
-        grip = margins(label(span("◷", 14, C["muted"])), left=7, right=5)
+        px = lambda n: max(1, int(round(n * STRIP_SCALE)))
+        row = margins(hbox(px(2)), px(1), px(4), px(1), px(3))
+        grip = margins(label(span("◷", px(12), C["muted"])), left=px(4), right=px(3))
         grip.set_tooltip_text(f"OpenUsage - {m.last_error}" if m.last_error else f"OpenUsage - {format_ago(m.updated_at)}")
         row.pack_start(grip, False, False, 0)
         shown = m.shown()
@@ -1765,7 +1781,7 @@ class App(Gtk.Application):
             # A hairline between providers; accounts of the same provider sit together.
             if prev is not None and prev != u["id"]:
                 sep = styled(Gtk.Box(), "divider")
-                sep.set_size_request(1, 20)
+                sep.set_size_request(1, px(16))
                 sep.set_valign(Gtk.Align.CENTER)
                 row.pack_start(margins(sep, left=3, right=3), False, False, 0)
             row.pack_start(strip_chip(u, m.display, m.gauge, i, m.intro), False, False, 0)

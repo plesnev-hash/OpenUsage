@@ -11,6 +11,7 @@ Linux window (`widget-linux/openusage.py`):
 - On a Wayland session with XWayland, the widget forces the X11 backend even when the parent process already set `GDK_BACKEND=wayland`. That is what lets GNOME keep the window above others and accept its position.
 - Starting `openusage.py` directly loads the Cairo bridge. Without it, drawing a provider logo aborted the window and left an empty 200×200 frame with no drag header. If `python3-gi-cairo` is missing, the script uses a vendored bridge under `.runtime` when that directory is present. `.runtime` is a local install artifact and is not part of this repository.
 - The shine layer no longer takes pointer clicks. Header buttons sit outside the drag surface. Dragging the "OpenUsage" title moves the window itself; asking the window manager to start a move did not move this undecorated XWayland window and swallowed the click.
+- The window is override-redirect, so the GNOME top bar (32px on this session) no longer pushes it back down. The slim strip is drawn at 0.7 scale so it is narrower and closer to that bar.
 
 Cursor (`src/providers/cursor.ts`):
 
